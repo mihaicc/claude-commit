@@ -63,9 +63,14 @@ function findClaude() {
     }
     return 'claude'; // fall back to PATH
 }
-function runClaude(diff, cwd, claudeBin) {
+const CANCELLED = 'cancelled';
+function runClaude(diff, cwd, claudeBin, token) {
     return new Promise((resolve, reject) => {
         const proc = cp.spawn(claudeBin, ['-p', PROMPT, '--dangerously-skip-permissions'], { cwd });
+        const cancel = token.onCancellationRequested(() => {
+            proc.kill();
+            reject(new Error(CANCELLED));
+        });
         proc.stdin.write(diff);
         proc.stdin.end();
         let stdout = '';
@@ -78,6 +83,7 @@ function runClaude(diff, cwd, claudeBin) {
         }, 60000);
         proc.on('close', (code) => {
             clearTimeout(timer);
+            cancel.dispose();
             if (code !== 0) {
                 reject(new Error(`claude exited with code ${code}${stderr.trim() ? ': ' + stderr.trim() : ''}`));
             }
@@ -87,6 +93,7 @@ function runClaude(diff, cwd, claudeBin) {
         });
         proc.on('error', (err) => {
             clearTimeout(timer);
+            cancel.dispose();
             reject(err);
         });
     });
@@ -98,15 +105,22 @@ function getFullDiff(cwd) {
     return cp.execSync('git diff', { cwd, encoding: 'utf8' });
 }
 function activate(context) {
-    const cmd = vscode.commands.registerCommand('claudeCommit.generate', async (sourceControl) => {
+    const cmd = vscode.commands.registerCommand('claudeCommit.generate', async (arg) => {
         const gitExt = vscode.extensions.getExtension('vscode.git')?.exports;
         const gitAPI = gitExt?.getAPI(1);
-        // Resolve the repository from: SCM context arg → active editor → first repo
+        // Resolve the repository from: SCM inputBox arg → SCM sourceControl arg → active editor → first repo
+        // When contributed to scm/inputBox, VS Code passes the SourceControlInputBox as arg (not SourceControl).
         let repo = gitAPI?.repositories?.[0];
-        if (gitAPI && sourceControl?.rootUri) {
-            const matched = gitAPI.repositories.find((r) => r.rootUri.fsPath === sourceControl.rootUri.fsPath);
-            if (matched)
-                repo = matched;
+        if (gitAPI && arg) {
+            const matchedByInputBox = gitAPI.repositories.find((r) => r.inputBox === arg);
+            if (matchedByInputBox) {
+                repo = matchedByInputBox;
+            }
+            else if (arg?.rootUri) {
+                const matchedByRoot = gitAPI.repositories.find((r) => r.rootUri.fsPath === arg.rootUri.fsPath);
+                if (matchedByRoot)
+                    repo = matchedByRoot;
+            }
         }
         else if (gitAPI && vscode.window.activeTextEditor) {
             const editorRepo = gitAPI.getRepository(vscode.window.activeTextEditor.document.uri);
@@ -145,9 +159,9 @@ function activate(context) {
         // Trim to avoid hitting token limits; ~30k chars covers most realistic diffs
         const trimmedDiff = diff.length > 30000 ? diff.slice(0, 30000) + '\n... (truncated)' : diff;
         const claudeBin = findClaude();
-        await vscode.window.withProgress({ location: vscode.ProgressLocation.Notification, title: 'Claude: generating commit message…', cancellable: false }, async () => {
+        await vscode.window.withProgress({ location: vscode.ProgressLocation.Notification, title: 'Claude: generating commit message…', cancellable: true }, async (_progress, token) => {
             try {
-                const message = await runClaude(trimmedDiff, folder, claudeBin);
+                const message = await runClaude(trimmedDiff, folder, claudeBin, token);
                 if (!message) {
                     vscode.window.showErrorMessage('Claude Commit: Empty response.');
                     return;
@@ -161,6 +175,9 @@ function activate(context) {
             }
             catch (err) {
                 const msg = err instanceof Error ? err.message : String(err);
+                if (msg === CANCELLED) {
+                    return;
+                }
                 if (msg.includes('ENOENT') || msg.includes('not found')) {
                     const action = await vscode.window.showErrorMessage(`Claude Commit: \`claude\` binary not found. Set the path in settings.`, 'Open Settings');
                     if (action === 'Open Settings') {

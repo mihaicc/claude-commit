@@ -29,13 +29,20 @@ function findClaude(): string {
   return 'claude'; // fall back to PATH
 }
 
-function runClaude(diff: string, cwd: string, claudeBin: string): Promise<string> {
+const CANCELLED = 'cancelled';
+
+function runClaude(diff: string, cwd: string, claudeBin: string, token: vscode.CancellationToken): Promise<string> {
   return new Promise((resolve, reject) => {
     const proc = cp.spawn(
       claudeBin,
       ['-p', PROMPT, '--dangerously-skip-permissions'],
       { cwd }
     );
+
+    const cancel = token.onCancellationRequested(() => {
+      proc.kill();
+      reject(new Error(CANCELLED));
+    });
 
     proc.stdin.write(diff);
     proc.stdin.end();
@@ -52,6 +59,7 @@ function runClaude(diff: string, cwd: string, claudeBin: string): Promise<string
 
     proc.on('close', (code) => {
       clearTimeout(timer);
+      cancel.dispose();
       if (code !== 0) {
         reject(new Error(`claude exited with code ${code}${stderr.trim() ? ': ' + stderr.trim() : ''}`));
       } else {
@@ -61,6 +69,7 @@ function runClaude(diff: string, cwd: string, claudeBin: string): Promise<string
 
     proc.on('error', (err) => {
       clearTimeout(timer);
+      cancel.dispose();
       reject(err);
     });
   });
@@ -76,17 +85,23 @@ function getFullDiff(cwd: string): string {
 
 
 export function activate(context: vscode.ExtensionContext) {
-  const cmd = vscode.commands.registerCommand('claudeCommit.generate', async (sourceControl?: vscode.SourceControl) => {
+  const cmd = vscode.commands.registerCommand('claudeCommit.generate', async (arg?: unknown) => {
     const gitExt = vscode.extensions.getExtension('vscode.git')?.exports;
     const gitAPI = gitExt?.getAPI(1);
 
-    // Resolve the repository from: SCM context arg → active editor → first repo
+    // Resolve the repository from: SCM inputBox arg → SCM sourceControl arg → active editor → first repo
+    // When contributed to scm/inputBox, VS Code passes the SourceControlInputBox as arg (not SourceControl).
     let repo = gitAPI?.repositories?.[0];
-    if (gitAPI && sourceControl?.rootUri) {
-      const matched = gitAPI.repositories.find(
-        (r: any) => r.rootUri.fsPath === sourceControl.rootUri!.fsPath
-      );
-      if (matched) repo = matched;
+    if (gitAPI && arg) {
+      const matchedByInputBox = gitAPI.repositories.find((r: any) => r.inputBox === arg);
+      if (matchedByInputBox) {
+        repo = matchedByInputBox;
+      } else if ((arg as any)?.rootUri) {
+        const matchedByRoot = gitAPI.repositories.find(
+          (r: any) => r.rootUri.fsPath === (arg as any).rootUri.fsPath
+        );
+        if (matchedByRoot) repo = matchedByRoot;
+      }
     } else if (gitAPI && vscode.window.activeTextEditor) {
       const editorRepo = gitAPI.getRepository(vscode.window.activeTextEditor.document.uri);
       if (editorRepo) repo = editorRepo;
@@ -130,10 +145,10 @@ export function activate(context: vscode.ExtensionContext) {
     const claudeBin = findClaude();
 
     await vscode.window.withProgress(
-      { location: vscode.ProgressLocation.Notification, title: 'Claude: generating commit message…', cancellable: false },
-      async () => {
+      { location: vscode.ProgressLocation.Notification, title: 'Claude: generating commit message…', cancellable: true },
+      async (_progress, token) => {
         try {
-          const message = await runClaude(trimmedDiff, folder, claudeBin);
+          const message = await runClaude(trimmedDiff, folder, claudeBin, token);
           if (!message) { vscode.window.showErrorMessage('Claude Commit: Empty response.'); return; }
           if (repo) {
             repo.inputBox.value = message;
@@ -142,6 +157,7 @@ export function activate(context: vscode.ExtensionContext) {
           }
         } catch (err) {
           const msg = err instanceof Error ? err.message : String(err);
+          if (msg === CANCELLED) { return; }
           if (msg.includes('ENOENT') || msg.includes('not found')) {
             const action = await vscode.window.showErrorMessage(
               `Claude Commit: \`claude\` binary not found. Set the path in settings.`,

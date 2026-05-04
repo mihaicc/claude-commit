@@ -4,6 +4,7 @@
   "description": "Generate commit messages using Claude Code CLI",
   "version": "0.1.0",
   "publisher": "mihaicc",
+  "repository": { "type": "git", "url": "https://github.com/mihaicc/claude-commit" },
   "engines": {
     "vscode": "^1.85.0"
   },
