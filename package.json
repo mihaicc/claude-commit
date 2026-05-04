@@ -1,0 +1,53 @@
+{
+  "name": "claude-commit",
+  "displayName": "Claude Commit",
+  "description": "Generate commit messages using Claude Code CLI",
+  "version": "0.1.0",
+  "publisher": "mihaicc",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": ["Other"],
+  "enabledApiProposals": ["contribSourceControlInputBoxMenu"],
+  "activationEvents": [],
+  "main": "./out/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "claudeCommit.generate",
+        "title": "Claude: Generate Commit Message",
+        "icon": "$(sparkle)"
+      }
+    ],
+    "menus": {
+      "scm/inputBox": [
+        {
+          "command": "claudeCommit.generate",
+          "when": "scmProvider == git",
+          "group": "navigation"
+        }
+      ]
+    },
+    "configuration": {
+      "title": "Claude Commit",
+      "properties": {
+        "claudeCommit.claudePath": {
+          "type": "string",
+          "default": "",
+          "markdownDescription": "Path to the `claude` binary. Leave empty to use `claude` from `PATH`."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "package": "vsce package --no-dependencies"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "@types/vscode": "^1.85.0",
+    "@vscode/vsce": "^3.0.0",
+    "typescript": "^5.3.0"
+  }
+}
